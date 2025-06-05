@@ -25,27 +25,19 @@ abstract class FluUvcPlatform extends PlatformInterface {
     _instance = instance;
   }
 
-  Future<String?> getPlatformVersion() {
-    throw UnimplementedError('platformVersion() has not been implemented.');
+  Future<bool> canScan() {
+    throw UnimplementedError('canScan() has not been implemented.');
   }
 
-  Future<bool> initCamera() {
-    throw UnimplementedError('initCamera() has not been implemented.');
+  Future<void> startScan() {
+    throw UnimplementedError('startScan() has not been implemented.');
   }
 
-  Future<bool> startCapture() {
-    throw UnimplementedError('startCapture() has not been implemented.');
-  }
-
-  Future<bool> stopCapture() {
-    throw UnimplementedError('stopCapture() has not been implemented.');
+  Future<void> stopScan() {
+    throw UnimplementedError('stopScan() has not been implemented.');
   }
 
   Future<Map> getImage() {
     throw UnimplementedError('getImage() has not been implemented.');
-  }
-
-  Future<bool> releaseCamera() {
-    throw UnimplementedError('releaseCamera() has not been implemented.');
   }
 }

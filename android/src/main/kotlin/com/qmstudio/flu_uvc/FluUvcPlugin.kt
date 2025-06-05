@@ -1,22 +1,32 @@
 package com.qmstudio.flu_uvc
-
+import android.Manifest
+import com.google.zxing.*
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
+import android.graphics.BitmapFactory
+import android.graphics.YuvImage
+import android.graphics.Rect
+import android.graphics.ImageFormat
+import java.io.ByteArrayOutputStream
 import android.content.Context
 import android.hardware.camera2.*
 import android.hardware.usb.*
-import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Log
 import android.util.Size
 import android.view.Surface
+import androidx.annotation.RequiresPermission
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import java.io.ByteArrayOutputStream
+import java.util.EnumMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
@@ -34,6 +44,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
   private var imageReader: ImageReader? = null
   private var backgroundThread: HandlerThread? = null
   private var backgroundHandler: Handler? = null
+  private var mainHandler: Handler? = null
   private val cameraOpenCloseLock = Semaphore(1)
   private var isCapturing = false
   private var imageData: ByteArray? = null
@@ -44,6 +55,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
     channel.setMethodCallHandler(this)
     context = flutterPluginBinding.applicationContext
     cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    mainHandler = Handler(Looper.getMainLooper())
   }
 
   private fun startBackgroundThread() {
@@ -54,8 +66,8 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
   }
 
   private fun stopBackgroundThread() {
-    backgroundThread?.quitSafely()
     try {
+      backgroundThread?.quitSafely()
       backgroundThread?.join()
       backgroundThread = null
       backgroundHandler = null
@@ -64,24 +76,22 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
     }
   }
 
+  @RequiresPermission(Manifest.permission.CAMERA)
   override fun onMethodCall(call: MethodCall, result: Result) {
     when (call.method) {
-      "getPlatformVersion" -> {
-        result.success("Android ${android.os.Build.VERSION.RELEASE}")
+      "canScan" -> {
+        result.success(findUsbCameraId()!=null)
       }
-      "initCamera" -> {
-        initCamera(result)
-      }
-      "startCapture" -> {
-        startCapture(result)
-      }
-      "stopCapture" -> {
-        stopCapture(result)
+      "startScan" -> {
+        initCamera()
+        startCapture()
+        result.success(true)
       }
       "getImage" -> {
         getImage(result)
       }
-      "releaseCamera" -> {
+      "stopScan" -> {
+        stopCapture()
         releaseCamera(result)
       }
       else -> {
@@ -90,10 +100,51 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
     }
   }
 
-  private fun initCamera(result: Result) {
+  // 添加条形码解析方法
+  private fun decodeBarcode(imageBytes: ByteArray): String? {
+    try {
+      // 将 JPEG 数据转换为 Bitmap
+      val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+
+      // 创建 ZXing 的 RGBLuminanceSource
+      val width = bitmap.width
+      val height = bitmap.height
+      val pixels = IntArray(width * height)
+      bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+      val source = RGBLuminanceSource(width, height, pixels)
+      val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
+
+      // 尝试多种格式
+      val formats = arrayOf(
+        BarcodeFormat.QR_CODE,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E
+      )
+
+      val hints = EnumMap<DecodeHintType, Any>(DecodeHintType::class.java)
+      hints[DecodeHintType.TRY_HARDER] = true
+      hints[DecodeHintType.POSSIBLE_FORMATS] = formats.toList()
+
+      val reader = MultiFormatReader()
+      val result = reader.decode(binaryBitmap, hints)
+
+      return result.text
+    } catch (e: Exception) {
+      Log.d("FluUvcPlugin", "Barcode decode failed: ${e.message}")
+      return null
+    }
+  }
+
+
+  @RequiresPermission(Manifest.permission.CAMERA)
+  private fun initCamera() {
     try {
       if (!cameraOpenCloseLock.tryAcquire(2500, TimeUnit.MILLISECONDS)) {
-        result.error("CAMERA_BUSY", "Failed to acquire camera lock", null)
         return
       }
 
@@ -105,7 +156,6 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       // 获取USB摄像头ID
       val cameraId = findUsbCameraId()
       if (cameraId == null) {
-        result.error("NO_CAMERA", "No USB camera found", null)
         return
       }
 
@@ -113,20 +163,37 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
 
       // 创建ImageReader
       imageReader = ImageReader.newInstance(
-        640, 480, ImageFormat.JPEG, 2
+        640, 480, ImageFormat.JPEG, 4
       ).apply {
         setOnImageAvailableListener({ reader ->
-          val image = reader.acquireLatestImage()
-          try {
-            val buffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining())
-            buffer.get(bytes)
-            
-            synchronized(captureLock) {
-              imageData = bytes
+          if(isCapturing){
+            val image = reader.acquireLatestImage()
+            var imageBytes: ByteArray? = null
+
+            try {
+              if (image != null) {
+                val buffer = image.planes[0].buffer
+                imageBytes = ByteArray(buffer.remaining())
+                buffer.get(imageBytes)
+              }
+            } finally {
+              image?.close()
             }
-          } finally {
-            image.close()
+
+            if (imageBytes != null) {
+              synchronized(captureLock) {
+                imageData = imageBytes
+                // 解析条形码
+                val barcodeResult = decodeBarcode(imageBytes)
+                if (barcodeResult != null) {
+                  Log.e("FluUvcPlugin", "Barcode detected: $barcodeResult")
+                  // 通过 Flutter 通道发送结果到主线程
+                  mainHandler?.post {
+                    channel.invokeMethod("onBarcodeDetected", barcodeResult)
+                  }
+                }
+              }
+            }
           }
         }, backgroundHandler)
       }
@@ -146,13 +213,11 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
         override fun onError(camera: CameraDevice, error: Int) {
           camera.close()
           cameraDevice = null
-          result.error("CAMERA_ERROR", "Camera error: $error", null)
+          Log.e("CAMERA_ERROR", "onError: $error", )
         }
       }, backgroundHandler)
 
-      result.success(true)
     } catch (e: Exception) {
-      result.error("INIT_ERROR", "Failed to initialize camera: ${e.message}", null)
     } finally {
       cameraOpenCloseLock.release()
     }
@@ -189,13 +254,19 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       facing == CameraCharacteristics.LENS_FACING_EXTERNAL
     }
   }
-
+  private var surfaceTexture: SurfaceTexture? = null
+    private var surface: Surface? = null
   private fun createCameraPreviewSession() {
     try {
-      val texture = SurfaceTexture(0)
-      val surface = Surface(texture)
+         // 确保之前的资源被释放
+            surfaceTexture?.release()
+            surface?.release()
+            
+            // 创建新的 SurfaceTexture
+            surfaceTexture = SurfaceTexture(0)
+            surface = Surface(surfaceTexture)
       val previewRequestBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-      previewRequestBuilder?.addTarget(surface)
+      previewRequestBuilder?.addTarget(surface!!)
       previewRequestBuilder?.addTarget(imageReader?.surface!!)
 
       cameraDevice?.createCaptureSession(
@@ -226,22 +297,19 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
     }
   }
 
-  private fun startCapture(result: Result) {
+  private fun startCapture() {
     synchronized(captureLock) {
       if (isCapturing) {
-        result.error("ALREADY_CAPTURING", "Camera is already capturing", null)
         return
       }
       isCapturing = true
     }
-    result.success(true)
   }
 
-  private fun stopCapture(result: Result?) {
+  private fun stopCapture() {
     synchronized(captureLock) {
       isCapturing = false
     }
-    result?.success(true)
   }
 
   private fun getImage(res: Result) {
@@ -278,7 +346,8 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
                     val result = mapOf(
                         "width" to width,
                         "height" to height,
-                        "data" to rgbBytes
+                        "data" to rgbBytes,
+                        "jpeg" to imageData
                     )
                     res.success(result)
                 }
@@ -296,11 +365,17 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
         isCapturing = false
         imageData = null
       }
+      // 3. 关闭图像读取器
+      try {
+        imageReader?.setOnImageAvailableListener(null, null)
+        imageReader?.close()
+      } catch (e: Exception) {
+        Log.e("FluUvcPlugin", "Error closing image reader: ${e.message}")
+      } finally {
+        imageReader = null
+      }
 
-      // 2. 停止后台线程
-      stopBackgroundThread()
-
-      // 3. 关闭捕获会话
+      // 2. 关闭捕获会话
       try {
         captureSession?.stopRepeating()
         captureSession?.close()
@@ -310,24 +385,21 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
         captureSession = null
       }
 
+      
+
       // 4. 关闭相机设备
       try {
-        cameraDevice?.close()
+        if (cameraDevice != null) {
+          val device = cameraDevice
+          cameraDevice = null
+          device?.close()
+        }
       } catch (e: Exception) {
         Log.e("FluUvcPlugin", "Error closing camera device: ${e.message}")
-      } finally {
-        cameraDevice = null
       }
 
-      // 5. 关闭图像读取器
-      try {
-        imageReader?.setOnImageAvailableListener(null, null)
-        imageReader?.close()
-      } catch (e: Exception) {
-        Log.e("FluUvcPlugin", "Error closing image reader: ${e.message}")
-      } finally {
-        imageReader = null
-      }
+      // 5. 停止后台线程
+      stopBackgroundThread()
 
       // 6. 释放相机锁
       if (cameraOpenCloseLock.availablePermits() == 0) {

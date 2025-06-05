@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flu_uvc/flu_uvc.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
+import 'dart:ui' as ui;
 
 void main() {
   runApp(const MyApp());
@@ -23,9 +24,9 @@ class _MyAppState extends State<MyApp> {
   void initState() {
     super.initState();
     initPlatformState();
-    Timer.periodic(const Duration(milliseconds: 200), (timer) {
-      _getImage();
-    });
+    // Timer.periodic(const Duration(milliseconds: 50), (timer) {
+    //   _getImage();
+    // });
   }
 
   // Platform messages are asynchronous, so we initialize in an async method.
@@ -33,11 +34,7 @@ class _MyAppState extends State<MyApp> {
     String platformVersion;
     // Platform messages may fail, so we use a try/catch PlatformException.
     // We also handle the message potentially returning null.
-    try {
-      platformVersion =
-          await _fluUvcPlugin.getPlatformVersion() ??
-          'Unknown platform version';
-    } on PlatformException {
+    try {} on PlatformException {
       platformVersion = 'Failed to get platform version.';
     }
 
@@ -56,39 +53,38 @@ class _MyAppState extends State<MyApp> {
           children: [
             ElevatedButton(
               onPressed: () async {
-                debugPrint("initCamera:${await _fluUvcPlugin.initCamera()}");
+                debugPrint("canScan:${await _fluUvcPlugin.canScan()}");
               },
-              child: Text('Init Camera'),
+              child: Text('canScan'),
             ),
             ElevatedButton(
               onPressed: () async {
-                debugPrint(
-                  "startCapture:${await _fluUvcPlugin.startCapture()}",
-                );
+                await _fluUvcPlugin.startScan();
               },
-              child: Text('Start Capture'),
+              child: Text('Start Scan'),
             ),
             ElevatedButton(
               onPressed: () async {
-                debugPrint("stopCapture:${await _fluUvcPlugin.stopCapture()}");
+                await _fluUvcPlugin.stopScan();
               },
-              child: Text('Stop Capture'),
+              child: Text('Stop Scan'),
             ),
             ElevatedButton(
               onPressed: () async {
-                final image = await _fluUvcPlugin.getImage();
-                print("image:${image}");
+                try {
+                  final imageInfo = await _fluUvcPlugin.getImage();
+
+                  imageData = imageInfo['jpeg'] as Uint8List;
+                  setState(() {});
+                } catch (e) {
+                  debugPrint("getImage error: $e");
+                }
               },
               child: Text('Get Image'),
             ),
-            ElevatedButton(
-              onPressed: () async {
-                debugPrint(
-                  "releaseCamera:${await _fluUvcPlugin.releaseCamera()}",
-                );
-              },
-              child: Text('Release Camera'),
-            ),
+
+            if (imageData != null)
+              Image.memory(imageData!, width: 320, height: 240),
             ...codes.map((e) => Text(e.text ?? "")),
           ],
         ),
@@ -98,11 +94,20 @@ class _MyAppState extends State<MyApp> {
 
   List<Code> codes = [];
 
+  Uint8List? imageData;
   void _getImage() async {
     try {
       final imageInfo = await _fluUvcPlugin.getImage();
+
+      final width = imageInfo['width'] as int;
+      final height = imageInfo['height'] as int;
+      final rgbData = imageInfo['data'] as Uint8List;
+      // imageData = imageInfo['jpeg'] as Uint8List;
+      // 创建 RGBA 数据
+      final rgbaData = Uint8List(width * height * 4);
+
       final code = Zxing().readBarcode(
-        imageInfo['data'],
+        rgbData,
         DecodeParams(
           imageFormat: ImageFormat.rgb,
           width: int.tryParse("${imageInfo['width']}") ?? 0,

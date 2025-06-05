@@ -7,43 +7,33 @@ import 'flu_uvc_platform_interface.dart';
 class MethodChannelFluUvc extends FluUvcPlatform {
   /// The method channel used to interact with the native platform.
   @visibleForTesting
-  final methodChannel = const MethodChannel('flu_uvc');
+  final methodChannel = const MethodChannel('flu_uvc')
+    ..setMethodCallHandler((call) async {
+      if (call.method == 'onBarcodeDetected') {
+        final barcode = call.arguments as String;
+        print('Barcode detected: $barcode');
+      }
+    });
 
   @override
-  Future<String?> getPlatformVersion() async {
-    final version = await methodChannel.invokeMethod<String>(
-      'getPlatformVersion',
-    );
-    return version;
-  }
-
-  @override
-  Future<bool> initCamera() async {
-    final result = await methodChannel.invokeMethod<bool>('initCamera');
+  Future<bool> canScan() async {
+    final result = await methodChannel.invokeMethod<bool>('canScan');
     return result ?? false;
   }
 
   @override
-  Future<bool> startCapture() async {
-    final result = await methodChannel.invokeMethod<bool>('startCapture');
-    return result ?? false;
+  Future<void> startScan() async {
+    await methodChannel.invokeMethod<void>('startScan');
   }
 
   @override
-  Future<bool> stopCapture() async {
-    final result = await methodChannel.invokeMethod<bool>('stopCapture');
-    return result ?? false;
+  Future<void> stopScan() async {
+    await methodChannel.invokeMethod<void>('stopScan');
   }
 
   @override
   Future<Map> getImage() async {
     final result = await methodChannel.invokeMethod<Map>('getImage');
     return result ?? {};
-  }
-
-  @override
-  Future<bool> releaseCamera() async {
-    final result = await methodChannel.invokeMethod<bool>('releaseCamera');
-    return result ?? false;
   }
 }
