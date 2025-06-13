@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -12,6 +14,7 @@ class MethodChannelFluUvc extends FluUvcPlatform {
       if (call.method == 'onBarcodeDetected') {
         final barcode = call.arguments as String;
         print('Barcode detected: $barcode');
+        FluUvcPlatform.instance.onBarcodeDetected(barcode);
       }
     });
 

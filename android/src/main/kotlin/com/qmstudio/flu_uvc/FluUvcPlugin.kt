@@ -167,17 +167,24 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       ).apply {
         setOnImageAvailableListener({ reader ->
           if(isCapturing){
-            val image = reader.acquireLatestImage()
+            var image: android.media.Image? = null
             var imageBytes: ByteArray? = null
 
             try {
+              image = reader.acquireLatestImage()
               if (image != null) {
                 val buffer = image.planes[0].buffer
                 imageBytes = ByteArray(buffer.remaining())
                 buffer.get(imageBytes)
               }
-            } finally {
-              image?.close()
+            }catch (e: Exception) {
+            Log.e("FluUvcPlugin", "Error processing image: ${e.message}")
+        }  finally {
+              try {
+                image?.close()
+            } catch (e: Exception) {
+                Log.e("FluUvcPlugin", "Error closing image: ${e.message}")
+            }
             }
 
             if (imageBytes != null) {

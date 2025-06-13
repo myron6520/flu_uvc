@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
@@ -23,6 +24,15 @@ abstract class FluUvcPlatform extends PlatformInterface {
   static set instance(FluUvcPlatform instance) {
     PlatformInterface.verifyToken(instance, _token);
     _instance = instance;
+  }
+
+  late final StreamController<String> _barcodeDetectedController =
+      StreamController.broadcast();
+
+  Stream<String> get barcodeDetectedStream =>
+      _barcodeDetectedController.stream.asBroadcastStream();
+  void onBarcodeDetected(String barcode) {
+    _barcodeDetectedController.add(barcode);
   }
 
   Future<bool> canScan() {

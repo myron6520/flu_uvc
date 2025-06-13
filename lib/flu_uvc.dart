@@ -3,6 +3,9 @@ import 'dart:typed_data';
 import 'flu_uvc_platform_interface.dart';
 
 class FluUvc {
+  Stream<String> get barcodeDetectedStream =>
+      FluUvcPlatform.instance.barcodeDetectedStream;
+
   Future<bool> canScan() {
     return FluUvcPlatform.instance.canScan();
   }
