@@ -44,6 +44,10 @@ class _MyAppState extends State<MyApp> {
     if (!mounted) return;
   }
 
+  Timer? _loopTimer;
+  bool _isScanning = false;
+  int _testCount = 0;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -69,6 +73,17 @@ class _MyAppState extends State<MyApp> {
               },
               child: Text('Stop Scan'),
             ),
+            Row(
+              children: [
+                ElevatedButton(
+                  onPressed: () async {
+                    startLoopingScan();
+                  },
+                  child: Text('Auto Test'),
+                ),
+                Text('测试次数：$_testCount'),
+              ],
+            ),
             ElevatedButton(
               onPressed: () async {
                 try {
@@ -90,6 +105,34 @@ class _MyAppState extends State<MyApp> {
         ),
       ),
     );
+  }
+
+  void startLoopingScan() {
+    if (_loopTimer != null) {
+      return;
+    }
+
+    _fluUvcPlugin.startScan();
+    _isScanning = true;
+
+    _loopTimer = Timer.periodic(Duration(seconds: 4), (timer) async {
+      if (_isScanning) {
+        await _fluUvcPlugin.stopScan();
+        setState(() {
+          _testCount++;
+        });
+        debugPrint("_testCount==$_testCount");
+      } else {
+        await _fluUvcPlugin.startScan();
+      }
+      _isScanning = !_isScanning;
+    });
+  }
+
+  void stopLoopingScan() {
+    _loopTimer?.cancel();
+    _loopTimer = null;
+    _isScanning = false;
   }
 
   List<Code> codes = [];
