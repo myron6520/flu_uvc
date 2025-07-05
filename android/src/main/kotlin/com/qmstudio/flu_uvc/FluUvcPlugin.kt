@@ -46,10 +46,11 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
   private var backgroundHandler: Handler? = null
   private var mainHandler: Handler? = null
   private val cameraOpenCloseLock = Semaphore(1)
-  private var isCapturing = false
-  private var imageData: ByteArray? = null
   private val captureLock = Object()
-
+  @Volatile private var imageData: ByteArray? = null
+  @Volatile private var isCapturing = false
+  @Volatile private var isImageReaderReleased = false
+  
   override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "flu_uvc")
     channel.setMethodCallHandler(this)
@@ -69,10 +70,11 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
     try {
       backgroundThread?.quitSafely()
       backgroundThread?.join()
-      backgroundThread = null
-      backgroundHandler = null
     } catch (e: InterruptedException) {
       Log.e("FluUvcPlugin", "Error stopping background thread: ${e.message}")
+    } finally {
+      backgroundThread = null
+      backgroundHandler = null
     }
   }
 
@@ -83,7 +85,6 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
         result.success(findUsbCameraId()!=null)
       }
       "startScan" -> {
-        initCamera()
         startCapture()
         result.success(true)
       }
@@ -140,7 +141,6 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
     }
   }
 
-
   @RequiresPermission(Manifest.permission.CAMERA)
   private fun initCamera() {
     try {
@@ -155,6 +155,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
 
       // 获取USB摄像头ID
       val cameraId = findUsbCameraId()
+      Log.e("FluUvcPlugin", "cameraId=" + cameraId);
       if (cameraId == null) {
         return
       }
@@ -162,48 +163,70 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       startBackgroundThread()
 
       // 创建ImageReader
+      isImageReaderReleased = false
+
       imageReader = ImageReader.newInstance(
-        640, 480, ImageFormat.JPEG, 4
+          640, 480, ImageFormat.YUV_420_888, 2
       ).apply {
-        setOnImageAvailableListener({ reader ->
-          if(isCapturing){
-            var image: android.media.Image? = null
-            var imageBytes: ByteArray? = null
+          setOnImageAvailableListener({ reader ->
+              if (!isCapturing || isImageReaderReleased) return@setOnImageAvailableListener
 
-            try {
-              image = reader.acquireLatestImage()
-              if (image != null) {
-                val buffer = image.planes[0].buffer
-                imageBytes = ByteArray(buffer.remaining())
-                buffer.get(imageBytes)
+              val startTime = System.currentTimeMillis()
+              val image = try {
+                  reader.acquireLatestImage()
+              } catch (e: Exception) {
+                  Log.e("FluUvcPlugin", "Image acquire failed: ${e.message}")
+                  null
               }
-            }catch (e: Exception) {
-            Log.e("FluUvcPlugin", "Error processing image: ${e.message}")
-        }  finally {
-              try {
-                image?.close()
-            } catch (e: Exception) {
-                Log.e("FluUvcPlugin", "Error closing image: ${e.message}")
-            }
-            }
 
-            if (imageBytes != null) {
-              synchronized(captureLock) {
-                imageData = imageBytes
-                // 解析条形码
-                val barcodeResult = decodeBarcode(imageBytes)
-                if (barcodeResult != null) {
-                  Log.e("FluUvcPlugin", "Barcode detected: $barcodeResult")
-                  // 通过 Flutter 通道发送结果到主线程
-                  mainHandler?.post {
-                    channel.invokeMethod("onBarcodeDetected", barcodeResult)
+              image?.let {
+                try {
+                  val yBuffer = it.planes[0].buffer
+                  val uBuffer = it.planes[1].buffer
+                  val vBuffer = it.planes[2].buffer
+
+                  val ySize = yBuffer.remaining()
+                  val uSize = uBuffer.remaining()
+                  val vSize = vBuffer.remaining()
+
+                  val nv21 = ByteArray(ySize + uSize + vSize)
+                  yBuffer.get(nv21, 0, ySize)
+
+                  val pixelStride = it.planes[1].pixelStride
+                  var uvIndex = ySize
+                  for (i in 0 until uSize step pixelStride) {
+                    nv21[uvIndex++] = vBuffer.get(i)
+                    nv21[uvIndex++] = uBuffer.get(i)
                   }
+
+                  val yuvImage = YuvImage(nv21, ImageFormat.NV21, it.width, it.height, null)
+                  val out = ByteArrayOutputStream()
+                  yuvImage.compressToJpeg(Rect(0, 0, it.width, it.height), 90, out)
+                  val jpegData = out.toByteArray()
+
+                  synchronized(captureLock) {
+                    imageData = jpegData
+                    decodeBarcode(jpegData)?.let { code ->
+                      val endTime = System.currentTimeMillis()
+                      val duration = endTime - startTime
+                      Log.d("FluUvcPlugin", "Barcode decode took --------------------------> ${duration}ms")
+
+                      mainHandler?.post {
+                        channel.invokeMethod("onBarcodeDetected", code)
+                      }
+                    }
+                  }
+                } catch (e: Exception) {
+                  Log.e("FluUvcPlugin", "Image processing error: ${e.message}")
+                } finally {
+                  try { 
+                    it.close() 
+                  } catch (_: Exception) {}
                 }
               }
-            }
-          }
-        }, backgroundHandler)
+          }, backgroundHandler)
       }
+
 
       // 打开相机
       cameraManager?.openCamera(cameraId, object : CameraDevice.StateCallback() {
@@ -232,46 +255,53 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
 
   private fun findUsbCameraId(): String? {
     Log.e("TAG", "开始查找USB摄像头...")
-    cameraManager?.cameraIdList?.forEach { id ->
-      val characteristics = cameraManager?.getCameraCharacteristics(id)
-      val facing = characteristics?.get(CameraCharacteristics.LENS_FACING)
-      val facingStr = when(facing) {
-        CameraCharacteristics.LENS_FACING_BACK -> "后置摄像头"
-        CameraCharacteristics.LENS_FACING_FRONT -> "前置摄像头"
-        CameraCharacteristics.LENS_FACING_EXTERNAL -> "外置摄像头"
-        else -> "未知类型"
+    try {
+      cameraManager?.cameraIdList?.forEach { id ->
+        val characteristics = cameraManager?.getCameraCharacteristics(id)
+        val facing = characteristics?.get(CameraCharacteristics.LENS_FACING)
+        val facingStr = when(facing) {
+          CameraCharacteristics.LENS_FACING_BACK -> "后置摄像头"
+          CameraCharacteristics.LENS_FACING_FRONT -> "前置摄像头"
+          CameraCharacteristics.LENS_FACING_EXTERNAL -> "外置摄像头"
+          else -> "未知类型"
+        }
+        
+        // 获取相机支持的分辨率
+        val map = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val sizes = map?.getOutputSizes(ImageFormat.JPEG)
+        
+        Log.e("TAG", """
+          相机ID: $id
+          类型: $facingStr
+          支持的分辨率: ${sizes?.joinToString { "${it.width}x${it.height}" }}
+          硬件级别: ${characteristics?.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)}
+          是否支持自动对焦: ${characteristics?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.isNotEmpty()}
+        """.trimIndent())
       }
       
-      // 获取相机支持的分辨率
-      val map = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-      val sizes = map?.getOutputSizes(ImageFormat.JPEG)
-      
-      Log.e("TAG", """
-        相机ID: $id
-        类型: $facingStr
-        支持的分辨率: ${sizes?.joinToString { "${it.width}x${it.height}" }}
-        硬件级别: ${characteristics?.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)}
-        是否支持自动对焦: ${characteristics?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.isNotEmpty()}
-      """.trimIndent())
-    }
-    
-    return cameraManager?.cameraIdList?.find { id ->
-      val characteristics = cameraManager?.getCameraCharacteristics(id)
-      val facing = characteristics?.get(CameraCharacteristics.LENS_FACING)
-      facing == CameraCharacteristics.LENS_FACING_EXTERNAL
+      return cameraManager?.cameraIdList?.find { id ->
+        val characteristics = cameraManager?.getCameraCharacteristics(id)
+        val facing = characteristics?.get(CameraCharacteristics.LENS_FACING)
+        facing == CameraCharacteristics.LENS_FACING_EXTERNAL
+      }
+    } catch (e: Exception) {
+      Log.e("FluUvcPlugin", "error: cameraManager.cameraIdList: ${e.message}")
+      return null
     }
   }
+
   private var surfaceTexture: SurfaceTexture? = null
-    private var surface: Surface? = null
+  private var surface: Surface? = null
+  
   private fun createCameraPreviewSession() {
     try {
-         // 确保之前的资源被释放
-            surfaceTexture?.release()
-            surface?.release()
-            
-            // 创建新的 SurfaceTexture
-            surfaceTexture = SurfaceTexture(0)
-            surface = Surface(surfaceTexture)
+      // 确保之前的资源被释放
+      surfaceTexture?.release()
+      surface?.release()
+      
+      // 创建新的 SurfaceTexture
+      surfaceTexture = SurfaceTexture(0)
+      surface = Surface(surfaceTexture)
       val previewRequestBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
       previewRequestBuilder?.addTarget(surface!!)
       previewRequestBuilder?.addTarget(imageReader?.surface!!)
@@ -309,6 +339,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       if (isCapturing) {
         return
       }
+      initCamera()
       isCapturing = true
     }
   }
@@ -371,6 +402,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       synchronized(captureLock) {
         isCapturing = false
         imageData = null
+        isImageReaderReleased = true
       }
       // 3. 关闭图像读取器
       try {
@@ -391,8 +423,6 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       } finally {
         captureSession = null
       }
-
-      
 
       // 4. 关闭相机设备
       try {
