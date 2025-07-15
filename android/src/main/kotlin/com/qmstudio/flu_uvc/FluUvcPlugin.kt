@@ -26,6 +26,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import java.nio.ByteBuffer
 import java.util.EnumMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -100,7 +101,58 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
       }
     }
   }
+  // 新的或修改后的解码方法
+  private fun decodeBarcodeFromYUV(
+    yBuffer: ByteBuffer,
+    yRowStride: Int,
+    width: Int,
+    height: Int
+  ): String? {
+    Log.e("TAG", "decodeBarcodeFromYUV: " )
+    try {
+      // 创建 PlanarYUVLuminanceSource
+      // 注意：PlanarYUVLuminanceSource 构造函数需要一个字节数组。
+      // 您可能需要从 ByteBuffer 中提取字节数组。
+      // 如果 yBuffer.hasArray() 为 true, 可以使用 yBuffer.array() (并考虑 offset 和 limit)
+      // 否则，需要 yBuffer.get(byteArray)
+      val yuvData = ByteArray(yBuffer.remaining())
+      yBuffer.get(yuvData)
 
+      // PlanarYUVLuminanceSource 构造函数通常需要图像左上角在数据中的偏移量（dataOffset），
+      // 以及实际图像数据区域的宽度和高度。
+      // 对于直接从 Image.planes[0] 获取的Y数据，dataOffset 通常是0，
+      // 传递给它的 width 和 height 就是图像的 width 和 height。
+      // rowStride 是 Y 平面中一行的总字节数，可能大于 width。
+      val source = PlanarYUVLuminanceSource(
+        yuvData,    // Y平面数据
+        width,      // 图像宽度
+        height,     // 图像高度
+        0,          // dataX: 图像左上角X坐标在数据中的偏移，通常是0
+        0,          // dataY: 图像左上角Y坐标在数据中的偏移，通常是0
+        width,      // 实际用于解码的区域宽度
+        height,     // 实际用于解码的区域高度
+        false       // reverseHorizontal: 是否水平翻转，通常是false
+      )
+
+      val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
+
+      val hints = EnumMap<DecodeHintType, Any>(DecodeHintType::class.java)
+      hints[DecodeHintType.TRY_HARDER] = true
+      // POSSIBLE_FORMATS 可以保持不变
+
+      val reader = MultiFormatReader() // 或者您需要的特定 Reader
+      val result = reader.decode(binaryBitmap, hints)
+      return result.text
+    } catch (e: Exception) {
+      // NotFoundException 是常见的，表示未找到条码
+      if (e is NotFoundException) {
+        // Log.d("FluUvcPlugin", "Barcode not found in YUV frame")
+      } else {
+        Log.e("FluUvcPlugin", "Barcode decode from YUV failed: ${e.message}")
+      }
+      return null
+    }
+  }
   // 添加条形码解析方法
   private fun decodeBarcode(imageBytes: ByteArray): String? {
     try {
@@ -179,48 +231,64 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
                   null
               }
 
-              image?.let {
+              image?.let { img ->
                 try {
-                  val yBuffer = it.planes[0].buffer
-                  val uBuffer = it.planes[1].buffer
-                  val vBuffer = it.planes[2].buffer
+                  val yPlane = img.planes[0]
+                  val yBuffer = yPlane.buffer
+                  val yRowStride = yPlane.rowStride
+                  val width = img.width
+                  val height = img.height
 
-                  val ySize = yBuffer.remaining()
-                  val uSize = uBuffer.remaining()
-                  val vSize = vBuffer.remaining()
-
-                  val nv21 = ByteArray(ySize + uSize + vSize)
-                  yBuffer.get(nv21, 0, ySize)
-
-                  val pixelStride = it.planes[1].pixelStride
-                  var uvIndex = ySize
-                  for (i in 0 until uSize step pixelStride) {
-                    nv21[uvIndex++] = vBuffer.get(i)
-                    nv21[uvIndex++] = uBuffer.get(i)
-                  }
-
-                  val yuvImage = YuvImage(nv21, ImageFormat.NV21, it.width, it.height, null)
-                  val out = ByteArrayOutputStream()
-                  yuvImage.compressToJpeg(Rect(0, 0, it.width, it.height), 90, out)
-                  val jpegData = out.toByteArray()
-
-                  synchronized(captureLock) {
-                    imageData = jpegData
-                    decodeBarcode(jpegData)?.let { code ->
-                      val endTime = System.currentTimeMillis()
+                  // 直接传递Y分量数据给解码函数
+                  decodeBarcodeFromYUV(yBuffer, yRowStride, width, height)?.let { code ->
+                    val endTime = System.currentTimeMillis()
                       val duration = endTime - startTime
                       Log.d("FluUvcPlugin", "Barcode decode took --------------------------> ${duration}ms")
 
                       mainHandler?.post {
                         channel.invokeMethod("onBarcodeDetected", code)
                       }
-                    }
                   }
+//                  val yBuffer = it.planes[0].buffer
+//                  val uBuffer = it.planes[1].buffer
+//                  val vBuffer = it.planes[2].buffer
+//
+//                  val ySize = yBuffer.remaining()
+//                  val uSize = uBuffer.remaining()
+//                  val vSize = vBuffer.remaining()
+//
+//                  val nv21 = ByteArray(ySize + uSize + vSize)
+//                  yBuffer.get(nv21, 0, ySize)
+//
+//                  val pixelStride = it.planes[1].pixelStride
+//                  var uvIndex = ySize
+//                  for (i in 0 until uSize step pixelStride) {
+//                    nv21[uvIndex++] = vBuffer.get(i)
+//                    nv21[uvIndex++] = uBuffer.get(i)
+//                  }
+//
+//                  val yuvImage = YuvImage(nv21, ImageFormat.NV21, it.width, it.height, null)
+//                  val out = ByteArrayOutputStream()
+//                  yuvImage.compressToJpeg(Rect(0, 0, it.width, it.height), 90, out)
+//                  val jpegData = out.toByteArray()
+//
+//                  synchronized(captureLock) {
+//                    imageData = jpegData
+//                    decodeBarcode(jpegData)?.let { code ->
+//                      val endTime = System.currentTimeMillis()
+//                      val duration = endTime - startTime
+//                      Log.d("FluUvcPlugin", "Barcode decode took --------------------------> ${duration}ms")
+//
+//                      mainHandler?.post {
+//                        channel.invokeMethod("onBarcodeDetected", code)
+//                      }
+//                    }
+//                  }
                 } catch (e: Exception) {
                   Log.e("FluUvcPlugin", "Image processing error: ${e.message}")
                 } finally {
-                  try { 
-                    it.close() 
+                  try {
+                    img.close()
                   } catch (_: Exception) {}
                 }
               }
@@ -243,7 +311,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
         override fun onError(camera: CameraDevice, error: Int) {
           camera.close()
           cameraDevice = null
-          Log.e("CAMERA_ERROR", "onError: $error", )
+          Log.e("CAMERA_ERROR", "onError: $error")
         }
       }, backgroundHandler)
 
@@ -364,7 +432,7 @@ class FluUvcPlugin: FlutterPlugin, MethodCallHandler {
                     }
                     
                     // 将 JPEG 转换为 RGB
-                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageData, 0, imageData!!.size)
+                    val bitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData!!.size)
                     val width = bitmap.width
                     val height = bitmap.height
                     val pixels = IntArray(width * height)

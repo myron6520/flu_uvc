@@ -6,12 +6,21 @@
 
 #include "generated_plugin_registrant.h"
 
+#include <connectivity_plus/connectivity_plus_windows_plugin.h>
 #include <file_selector_windows/file_selector_windows.h>
 #include <flu_uvc/flu_uvc_plugin_c_api.h>
+#include <m2pos/m2pos_plugin_c_api.h>
+#include <permission_handler_windows/permission_handler_windows_plugin.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
+  ConnectivityPlusWindowsPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("ConnectivityPlusWindowsPlugin"));
   FileSelectorWindowsRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FileSelectorWindows"));
   FluUvcPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FluUvcPluginCApi"));
+  M2posPluginCApiRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("M2posPluginCApi"));
+  PermissionHandlerWindowsPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("PermissionHandlerWindowsPlugin"));
 }

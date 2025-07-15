@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   file_selector_linux
   flu_uvc
+  m2pos
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
